@@ -1,29 +1,79 @@
+# Python
 __pycache__/
-.DS_Store
-.ruff_cache/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
 .tox/
+*.so
+.eggs/
+*.egg
+*.egg-info
+nosetests.xml
+coverage.xml
+
+# Virtual environments
 .venv*/
-.vscode/
-*.blend1
-*.code-workspace
-/.coverage
-/.pytest_cache/
+/venv/
 /.venv/
+env/
+ENV/
+.env
+.python-version
+
+# OS specific files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# IDEs and editors
+.vscode/
+.ruff_cache/
+*.code-workspace
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# Build and distribution
 /build/
-/DisplayCAL.egg-info/dependency_links.txt
-/DisplayCAL.egg-info/PKG-INFO
-/DisplayCAL.egg-info/requires.txt
-/DisplayCAL.egg-info/SOURCES.txt
-/DisplayCAL.egg-info/top_level.txt
-/DisplayCAL/__version__.py
-/DisplayCAL/ref/*.log
 /dist/
+/DisplayCAL.egg-info/
 /INSTALLED_FILES
 /MANIFEST.in
-/tests/data/icc/Monitor 1 #1 2022-03-09 16-13 D6500 2.2 F-S XYZLUT+MTX.B2A1.post.CLUT.png
-/tests/data/icc/Monitor 1 #1 2022-03-09 16-13 D6500 2.2 F-S XYZLUT+MTX.B2A1.post.CLUT.smooth.png
-/venv/
 /VERSION
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Application specific
+/DisplayCAL/__version__.py
 cacert.pem
 main.py
-MANIFEST.in
+
+# Documentation
+docs/_build/
+docs/generated/
+
+# Test data
+/DisplayCAL/ref/*.log
+/tests/data/icc/Monitor 1 #1 2022-03-09 16-13 D6500 2.2 F-S XYZLUT+MTX.B2A1.post.CLUT.png
+/tests/data/icc/Monitor 1 #1 2022-03-09 16-13 D6500 2.2 F-S XYZLUT+MTX.B2A1.post.CLUT.smooth.png
+
+# 3D modeling files
+*.blend1
+
+# Profiling data
+.prof
+profile_*.txt
+*.pstat
+
+# Log files
+*.log
+
+# Miscellaneous
+.qodo
