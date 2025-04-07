@@ -5012,8 +5012,7 @@ END_DATA
                                     get_data_path(
                                         os.path.join(
                                             "scripts",
-                                            appname.lower()
-                                            + "-eecolor-to-madvr-converter",
+                                            f"{appname.lower()}-eecolor-to-madvr-converter",
                                         )
                                     )
                                 )
@@ -5021,7 +5020,7 @@ END_DATA
                                 # Linux
                                 interp_args.append(
                                     which(
-                                        appname.lower() + "-eecolor-to-madvr-converter"
+                                        f"{appname.lower()}-eecolor-to-madvr-converter"
                                     )
                                 )
                     elif isapp:
@@ -5113,22 +5112,30 @@ END_DATA
                     if isinstance(profile_in.tags.get("A2B0"), ICCP.LUT16Type):
                         # Write diagnostic PNG
                         profile_in.tags.A2B0.clut_writepng(
-                            os.path.splitext(profile_in.fileName)[0] + ".A2B0.CLUT.png"
+                            "{}.A2B0.CLUT.png".format(
+                                os.path.splitext(profile_in.fileName)[0]
+                            )
                         )
                     if isinstance(profile_in.tags.get("DBG0"), ICCP.LUT16Type):
                         # HDR RGB
                         profile_in.tags.DBG0.clut_writepng(
-                            os.path.splitext(profile_in.fileName)[0] + ".DBG0.CLUT.png"
+                            "{}.DBG0.CLUT.png".format(
+                                os.path.splitext(profile_in.fileName)[0]
+                            )
                         )
                     if isinstance(profile_in.tags.get("DBG1"), ICCP.LUT16Type):
                         # Display RGB
                         profile_in.tags.DBG1.clut_writepng(
-                            os.path.splitext(profile_in.fileName)[0] + ".DBG1.CLUT.png"
+                            "{}.DBG1.CLUT.png".format(
+                                os.path.splitext(profile_in.fileName)[0]
+                            )
                         )
                     if isinstance(profile_in.tags.get("DBG2"), ICCP.LUT16Type):
                         # Display XYZ
                         profile_in.tags.DBG2.clut_writepng(
-                            os.path.splitext(profile_in.fileName)[0] + ".DBG2.CLUT.png"
+                            "{}.DBG2.CLUT.png".format(
+                                os.path.splitext(profile_in.fileName)[0]
+                            )
                         )
 
             if is_argyll_lut_format or (use_xicclu and format == "madVR"):
@@ -5159,7 +5166,7 @@ END_DATA
                                     # Add DOMAIN_MIN/MAX keywords
                                     cube_data.append(b"DOMAIN_MIN 0.0 0.0 0.0\n")
                                     fp_offset = str(maxval).find(".")
-                                    domain_max = b"DOMAIN_MAX {} {} {}\n" % (
+                                    domain_max = b"DOMAIN_MAX %s %s %s\n" % (
                                         (b"%%.%if" % len(str(maxval)[fp_offset + 1 :]),)
                                         * 3
                                     )
@@ -5179,7 +5186,7 @@ END_DATA
                     result = UnloggedError(lang.getstr("aborted"))
                 if isinstance(result2, Exception):
                     if isinstance(result, Exception):
-                        result = Error(str(result) + "\n\n" + str(result2))
+                        result = Error(f"{result}\n\n{result2}")
                     else:
                         result = result2
                 if not isinstance(result, Exception):
@@ -9766,14 +9773,19 @@ usage: spotread [-options] [logfile]
                 if resp:
                     argyll_version_string = resp.read().strip()
 
-            installer_basename = (
-                f"Argyll_V{argyll_version_string}_USB_driver_installer.exe"
-            )
-
+            installer_basename = "ArgyllCMS_install_USB.exe"
             download_dir = os.path.join(config.datahome, "dl")
-            installer = os.path.join(download_dir, installer_basename)
-
+            installer = os.path.join(
+                download_dir,
+                f"Argyll_V{argyll_version_string}",
+                "usb",
+                installer_basename,
+            )
             if not os.path.isfile(installer):
+                # Update installer_basename to the one that is used in DisplayCAL.net
+                installer_basename = (
+                    f"Argyll_V{argyll_version_string}_USB_driver_installer.exe"
+                )
                 installer_zip = self.download(
                     f"https://{DOMAIN}/Argyll/{installer_basename}.zip"
                 )
@@ -15004,7 +15016,6 @@ usage: spotread [-options] [logfile]
 
         Return gamut volume (int, scaled to sRGB = 1.0) and
         coverage (dict) as tuple.
-
         """
         if isinstance(profile_path, list):
             profile_paths = profile_path
@@ -15196,7 +15207,7 @@ usage: spotread [-options] [logfile]
                         with open(tmpfilename, "wb") as outfile:
                             outfile.write(tweak_vrml(vrml).encode())
                     if filename.endswith(".wrl"):
-                        filename = filename[:-4] + ".wrz"
+                        filename = f"{filename[:-4]}.wrz"
                     else:
                         filename = gzfilename
                     if tmpfilename != filename:
