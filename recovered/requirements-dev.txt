@@ -1,0 +1,22 @@
+coverage
+darglint
+flake8
+flake8-bugbear
+flake8-docstrings
+flake8-import-order
+flake8-mutable
+flake8-pep3101
+flake8-spellcheck
+matplotlib
+py2app; sys_platform == "darwin" and python_version < "3.13"
+py2exe; sys_platform == "win32" and python_version < "3.13"
+pyglet
+pytest
+pytest-cov
+pytest-github-actions-annotate-failures
+pytest-xdist
+ruff
+snowballstemmer
+twine
+uv
+wheel
