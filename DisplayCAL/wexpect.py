@@ -399,6 +399,27 @@ def spawn(
 
     Dispatches to spawn_unix, conpty.spawn_windows_conpty (Win10+),
     or the legacy spawn_windows (Wtty) class.
+    
+    This function automatically detects the appropriate backend:
+    1. On Unix/Linux/Mac systems, uses the standard spawn_unix implementation
+    2. On Windows, uses one of:
+       a. ConPTY (Modern Windows 10 v1809/build 17763+): Provides reliable 
+          Unicode handling and true pty-like functionality.
+       b. Legacy Wtty (Older Windows): Falls back to screen scraping via
+          Win32 console functions with potential encoding limitations.
+          
+    The ConPTY implementation requires Windows 10 October 2018 Update (1809/build 17763)
+    or newer. On older systems, the function automatically falls back to the legacy
+    implementation.
+    
+    Parameters specific to ConPTY:
+    - encoding: Text encoding for input/output (default 'utf-8')
+    - errors: How to handle encoding errors (default 'replace') 
+    - dimensions: Terminal size as (columns, rows) tuple (default (80, 25))
+    
+    Parameters specific to legacy Windows backend:
+    - codepage: Console codepage number (default None = use system default)
+    - columns, rows: Terminal dimensions
     """
     if args is None: args = []
 
@@ -406,10 +427,24 @@ def spawn(
     # log(f"Spawning: {command} {' '.join(args)}")
 
     if sys.platform == "win32":
+        # First, try to import the ConPTY module if we haven't already
+        if 'spawn_windows_conpty' not in globals():
+            try:
+                # Import here to avoid circular import and to allow
+                # graceful fallback to legacy implementation if ConPTY not available
+                from .conpty import spawn_windows_conpty, _CONPTY_AVAILABLE
+                globals()['spawn_windows_conpty'] = spawn_windows_conpty
+                globals()['_CONPTY_AVAILABLE'] = _CONPTY_AVAILABLE
+            except (ImportError, AttributeError, OSError):
+                globals()['spawn_windows_conpty'] = None
+                globals()['_CONPTY_AVAILABLE'] = False
+                # log("ConPTY module failed to load, using legacy backend") # Optional logging
+        
         win_ver = sys.getwindowsversion()
         # ConPTY requires Win10 build 17763 (version 1809) or later
         use_conpty = (win_ver.major >= 10 and win_ver.build >= 17763 and
-                      _CONPTY_AVAILABLE and spawn_windows_conpty is not None)
+                      globals().get('_CONPTY_AVAILABLE', False) and 
+                      globals().get('spawn_windows_conpty') is not None)
 
         if use_conpty:
             # log("Using ConPTY backend.") # Optional logging
@@ -417,7 +452,7 @@ def spawn(
                 command=command, args=args, timeout=timeout, maxread=maxread,
                 searchwindowsize=searchwindowsize, logfile=logfile, cwd=cwd, env=env,
                 encoding=encoding, errors=errors, dimensions=dimensions,
-                fallback_encoding='cp1252' # Example fallback
+                fallback_encoding='latin-1' # Changed from 'cp1252' to safer 'latin-1'
             )
         else:
             # log("Using legacy Wtty backend.") # Optional logging
@@ -2025,6 +2060,26 @@ class spawn_windows(spawn_unix):
         It will not wait for 30 seconds for another 99 characters to come in.
 
         This is a wrapper around Wtty.read().
+        
+        IMPORTANT: Encoding Limitations (Legacy Windows Backend)
+        --------------------------------------------------------
+        The legacy Windows backend (Wtty) works by scraping the Windows console
+        buffer. This introduces potential encoding issues:
+        
+        1. The Windows console uses a specific codepage (e.g., cp1252 for Western
+           European Windows, cp932 for Japanese Windows, etc.)
+        
+        2. This method uses a two-step encoding/decoding process:
+           - Data received from Wtty is already decoded using the console's codepage
+           - We re-encode this text to bytes using the console codepage
+           - Then decode it again using the user-specified encoding (self.encoding)
+        
+        3. Limitation: If the child process outputs bytes that are invalid in the
+           console's codepage, data loss can occur BEFORE reaching this method.
+           This is an unavoidable limitation of the legacy Windows backend.
+           
+        4. For reliable Unicode handling on Windows, use the ConPTY backend which
+           is available on Windows 10 (1809/build 17763) and newer.
         """
         if self.closed:
             raise ValueError("I/O operation on closed file in read_nonblocking().")
@@ -2052,6 +2107,12 @@ class spawn_windows(spawn_unix):
             except LookupError:
                 # Fallback if codepage is invalid (shouldn't happen often)
                 s_bytes = s.encode('latin-1', 'replace')
+                log(f"Warning: Failed to find codepage encoding cp{self.wtty.codepage}, falling back to latin-1", "_encoding_warnings")
+
+            # Log first use of the workaround to help diagnose encoding issues
+            if not hasattr(self, '_logged_encoding_warning') and s:
+                log(f"Legacy Windows backend (Wtty) encoding workaround active: console cp{self.wtty.codepage} → {self.encoding}", "_encoding_info")
+                self._logged_encoding_warning = True
 
             # Decode using the encoding specified for this spawn instance
             decoded_s = s_bytes.decode(self.encoding, self.errors)
