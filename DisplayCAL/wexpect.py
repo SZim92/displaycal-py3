@@ -74,6 +74,7 @@ import struct
 import sys
 import time
 import traceback
+import threading # Needed for locks in legacy spawn_windows
 
 if sys.platform != "win32":
     import pty
@@ -140,6 +141,17 @@ else:
     import win32file
     import winerror
 
+    # +++ Import the new ConPTY backend +++
+    try:
+        # Use relative import assuming conpty.py is in the same package
+        from .conpty import spawn_windows_conpty, _CONPTY_AVAILABLE
+    except ImportError as e:
+        # Fallback if import fails
+        print(f"Warning: Could not import ConPTY backend from .conpty: {e}")
+        spawn_windows_conpty = None
+        _CONPTY_AVAILABLE = False
+    # +++ End ConPTY Import +++
+
 
 __version__ = "2.3"
 __revision__ = "$Revision: 399 $"
@@ -181,12 +193,13 @@ class ExceptionPexpect(Exception):
         return "".join(tblist)
 
     def __filter_not_pexpect(self, trace_list_item):
-        """This returns True if list item 0 the string 'pexpect.py' in it."""
-
-        if trace_list_item[0].find("pexpect.py") == -1:
-            return True
-        else:
-            return False
+        """This returns True if list item 0 doesn't contain 'wexpect.py' or 'conpty.py'."""
+        # *** MODIFIED: Filter out frames from both wexpect.py and conpty.py ***
+        module_files = ['wexpect.py', 'conpty.py']
+        # Use item.filename (Python 3) instead of item[0]
+        # Assuming trace_list_item is a FrameSummary object from traceback.extract_tb
+        filename = getattr(trace_list_item, 'filename', trace_list_item[0]) # Handle tuple/object
+        return not any(f in filename for f in module_files)
 
 
 class EOF(ExceptionPexpect):
@@ -216,6 +229,8 @@ def run(
     logfile=None,
     cwd=None,
     env=None,
+    encoding='utf-8', # Added
+    errors='replace', # Added
 ):
     """This function runs the given command; waits for it to finish; then
     returns all output as a string. STDERR is included in output. If the full
@@ -287,12 +302,20 @@ def run(
     the child. 'extra_args' is not used by directly run(). It provides a way to
     pass data to a callback function through run() through the locals
     dictionary passed to a callback."""
-    if timeout == -1:
-        child = spawn(command, maxread=2000, logfile=logfile, cwd=cwd, env=env)
-    else:
-        child = spawn(
-            command, timeout=timeout, maxread=2000, logfile=logfile, cwd=cwd, env=env
-        )
+    # *** MODIFIED: Pass encoding and errors to spawn ***
+    spawn_kwargs = {
+        'maxread': 2000,
+        'logfile': logfile,
+        'cwd': cwd,
+        'env': env,
+        'encoding': encoding,
+        'errors': errors
+    }
+    if timeout != -1:
+        spawn_kwargs['timeout'] = timeout
+
+    child = spawn(command, **spawn_kwargs)
+
     if events is not None:
         patterns = list(events.keys())
         responses = list(events.values())
@@ -304,10 +327,24 @@ def run(
     while 1:
         try:
             index = child.expect(patterns)
-            if isinstance(child.after, str):
-                child_result_list.append(child.before + child.after)
-            else:  # child.after may have been a TIMEOUT or EOF, so don't cat those.
-                child_result_list.append(child.before)
+
+            # *** MODIFIED: Ensure before/after are strings before appending ***
+            before_str = child.before
+            if isinstance(before_str, bytes):
+                before_str = before_str.decode(child.encoding, child.errors)
+
+            after_str = child.after
+            if isinstance(after_str, bytes):
+                 # Don't decode EOF/TIMEOUT markers if they are bytes (shouldn't happen with new backends)
+                if after_str is not EOF and after_str is not TIMEOUT:
+                    after_str = after_str.decode(child.encoding, child.errors)
+
+            if after_str is EOF or after_str is TIMEOUT:
+                child_result_list.append(before_str)
+            else:
+                child_result_list.append(before_str + after_str)
+            # *** End Modification ***
+
             if isinstance(responses[index], str):
                 child.send(responses[index])
             elif callable(responses[index]):
@@ -321,10 +358,18 @@ def run(
                 raise TypeError("The callback must be a string or function type.")
             event_count = event_count + 1
         except TIMEOUT:
-            child_result_list.append(child.before)
+            # *** MODIFIED: Ensure before is string on TIMEOUT ***
+            before_str = child.before
+            if isinstance(before_str, bytes):
+                before_str = before_str.decode(child.encoding, child.errors)
+            child_result_list.append(before_str)
             break
         except EOF:
-            child_result_list.append(child.before)
+            # *** MODIFIED: Ensure before is string on EOF ***
+            before_str = child.before
+            if isinstance(before_str, bytes):
+                before_str = before_str.decode(child.encoding, child.errors)
+            child_result_list.append(before_str)
             break
     child_result = "".join(child_result_list)
     if withexitstatus:
@@ -338,49 +383,57 @@ def spawn(
     command,
     args=None,
     timeout=30,
-    maxread=2000,
+    maxread=2000, # Default for Unix/ConPTY
     searchwindowsize=None,
     logfile=None,
     cwd=None,
     env=None,
-    codepage=None,
-    columns=None,
-    rows=None,
+    # --- Parameters relevant to modern backends ---
+    encoding='utf-8', # Default encoding
+    errors='replace',
+    # --- Parameters for console/PTY dimensions ---
+    dimensions=(80, 25) # Default dimensions (cols, rows)
 ):
-    if args is None:
-        args = []
+    """
+    Creates an appropriate spawn object based on the platform and capabilities.
 
-    log("=" * 80)
-    log(f"Buffer size: {maxread}")
-    if searchwindowsize:
-        log(f"Search window size: {searchwindowsize}")
-    log(f"Timeout: {timeout}s")
-    if env:
-        log("Environment:")
-        for name in env:
-            log(f"\t{name}={env[name]}")
-    if cwd:
-        if isinstance(cwd, bytes):
-            cwd = cwd.decode("utf-8")
-        log(f"Working directory: {cwd}")
-    log("Spawning {}".format(join_args([command] + args)))
+    Dispatches to spawn_unix, conpty.spawn_windows_conpty (Win10+),
+    or the legacy spawn_windows (Wtty) class.
+    """
+    if args is None: args = []
+
+    # log("=" * 80) # Optional logging
+    # log(f"Spawning: {command} {' '.join(args)}")
+
     if sys.platform == "win32":
-        return spawn_windows(
-            command,
-            args,
-            timeout,
-            maxread,
-            searchwindowsize,
-            logfile,
-            cwd,
-            env,
-            codepage,
-            columns,
-            rows,
-        )
+        win_ver = sys.getwindowsversion()
+        # ConPTY requires Win10 build 17763 (version 1809) or later
+        use_conpty = (win_ver.major >= 10 and win_ver.build >= 17763 and
+                      _CONPTY_AVAILABLE and spawn_windows_conpty is not None)
+
+        if use_conpty:
+            # log("Using ConPTY backend.") # Optional logging
+            return spawn_windows_conpty(
+                command=command, args=args, timeout=timeout, maxread=maxread,
+                searchwindowsize=searchwindowsize, logfile=logfile, cwd=cwd, env=env,
+                encoding=encoding, errors=errors, dimensions=dimensions,
+                fallback_encoding='cp1252' # Example fallback
+            )
+        else:
+            # log("Using legacy Wtty backend.") # Optional logging
+            cols, rows = dimensions if dimensions else (None, None)
+            legacy_maxread = 60000 # Wtty used a different default
+            return spawn_windows( # Call the legacy class defined below
+                command=command, args=args, timeout=timeout, maxread=legacy_maxread,
+                searchwindowsize=searchwindowsize, logfile=logfile, cwd=cwd, env=env,
+                codepage=None, columns=cols, rows=rows,
+                encoding=encoding, errors=errors # Pass encoding/errors here
+            )
     else:
+        # Non-Windows: Use spawn_unix
         return spawn_unix(
-            command, args, timeout, maxread, searchwindowsize, logfile, cwd, env
+            command=command, args=args, timeout=timeout, maxread=maxread,
+            searchwindowsize=searchwindowsize, logfile=logfile, cwd=cwd, env=env
         )
 
 
@@ -508,6 +561,8 @@ class spawn_unix(object):
         logfile=None,
         cwd=None,
         env=None,
+        encoding='utf-8', # Added
+        errors='replace', # Added
     ):
         if args is None:
             args = []
@@ -546,7 +601,8 @@ class spawn_unix(object):
         self.delayafterterminate = 0.1  # Sets delay in terminate() method to allow kernel time to update process status. Time in seconds.
         self.softspace = False  # File-like object.
         self.name = f"<{repr(self)}>"  # File-like object.
-        self.encoding = None  # File-like object.
+        self.encoding = encoding # Store encoding
+        self.errors = errors # Store errors
         self.closed = True  # File-like object.
         self.ocwd = os.getcwd()
         self.cwd = cwd
@@ -984,14 +1040,19 @@ class spawn_unix(object):
                     "End Of File (EOF) in read_nonblocking(). Empty string style platform."
                 )
 
+            # *** MODIFIED: Decode bytes to string ***
+            decoded_s = s.decode(self.encoding, self.errors)
+
             if self.logfile is not None:
-                self.logfile.write(s)
+                # Log the decoded string
+                self.logfile.write(decoded_s)
                 self.logfile.flush()
             if self.logfile_read is not None:
-                self.logfile_read.write(s)
+                 # Log the decoded string
+                self.logfile_read.write(decoded_s)
                 self.logfile_read.flush()
 
-            return s
+            return decoded_s # Return decoded string
 
         raise ExceptionPexpect("Reached an unexpected state in read_nonblocking().")
 
@@ -1085,7 +1146,8 @@ class spawn_unix(object):
         if not isinstance(s, bytes):
             if not isinstance(s, str):
                 s = str(s)
-            s = s.encode("utf-8")
+            # *** MODIFIED: Use instance encoding and errors ***
+            s = s.encode(self.encoding, self.errors)
         c = os.write(self.child_fd, s)
         return c
 
@@ -1520,10 +1582,7 @@ class spawn_unix(object):
                 c = self.read_nonblocking(self.maxread, timeout)
                 freshlen = len(c)
                 time.sleep(0.0001)
-                if sys.platform == "win32":
-                    incoming += c
-                else:
-                    incoming += c.decode()
+                incoming += c
                 if timeout is not None:
                     timeout = end_time - time.time()
         except EOF as e:
@@ -1625,8 +1684,15 @@ class spawn_unix(object):
             escape_character = chr(29)
 
         # Flush the buffer.
-        self.stdout.write(self.buffer)
-        self.stdout.flush()
+        # *** MODIFIED: Write bytes to stdout buffer ***
+        buffer_bytes = self.buffer.encode(self.encoding, self.errors)
+        try:
+            # Try writing to buffer attribute if available (preferred)
+            self.stdout.buffer.write(buffer_bytes)
+            self.stdout.flush()
+        except AttributeError:
+            # Fallback to os.write if buffer attribute doesn't exist
+             os.write(self.STDOUT_FILENO, buffer_bytes)
         self.buffer = ""
         mode = tty.tcgetattr(self.STDIN_FILENO)
         tty.setraw(self.STDIN_FILENO)
@@ -1637,15 +1703,18 @@ class spawn_unix(object):
 
     def __interact_writen(self, fd, data):
         """This is used by the ``interact()`` method."""
-        if not isinstance(data, bytes):
-            data = data.encode("utf-8")
+        # *** MODIFIED: Encode string using self.encoding ***
+        if isinstance(data, str):
+            data = data.encode(self.encoding, self.errors)
         while data != b"" and self.isalive():
             n = os.write(fd, data)
             data = data[n:]
 
     def __interact_read(self, fd):
         """This is used by the ``interact()`` method."""
-        return os.read(fd, 1000)
+        # *** MODIFIED: Read bytes and decode to string ***
+        data_bytes = os.read(fd, 1000)
+        return data_bytes.decode(self.encoding, self.errors)
 
     def __interact_copy(
         self, escape_character=None, input_filter=None, output_filter=None
@@ -1655,25 +1724,42 @@ class spawn_unix(object):
             r, w, e = self.__select([self.child_fd, self.STDIN_FILENO], [], [])
             if self.child_fd in r:
                 try:
-                    data = self.__interact_read(self.child_fd)
+                    # __interact_read now returns string
+                    data_str = self.__interact_read(self.child_fd)
                 except OSError:
                     break
                 if output_filter:
-                    data = output_filter(data)
+                    data_str = output_filter(data_str) # Filter the string
+
+                # *** MODIFIED: Log and write string (encoded) ***
                 if self.logfile is not None:
-                    self.logfile.write(data)
-                    self.logfile.flush()
-                os.write(self.STDOUT_FILENO, data)
+                    # Logfile expects string or bytes depending on how it was opened
+                    # Assuming it handles strings or was opened in text mode
+                    try:
+                        self.logfile.write(data_str)
+                        self.logfile.flush()
+                    except TypeError: # If logfile expects bytes
+                         self.logfile.write(data_str.encode(self.encoding, self.errors))
+                         self.logfile.flush()
+
+                # Encode string to bytes for writing to stdout FD
+                stdout_encoding = getattr(sys.stdout, 'encoding', 'utf-8') or 'utf-8'
+                data_bytes_stdout = data_str.encode(stdout_encoding, 'replace')
+                os.write(self.STDOUT_FILENO, data_bytes_stdout)
+
             if self.STDIN_FILENO in r:
-                data = self.__interact_read(self.STDIN_FILENO)
+                 # __interact_read now returns string
+                data_str = self.__interact_read(self.STDIN_FILENO)
                 if input_filter:
-                    data = input_filter(data)
-                i = data.rfind(escape_character)
+                    data_str = input_filter(data_str) # Filter the string
+                i = data_str.rfind(escape_character)
                 if i != -1:
-                    data = data[:i]
-                    self.__interact_writen(self.child_fd, data)
+                    data_str = data_str[:i]
+                    # __interact_writen handles encoding
+                    self.__interact_writen(self.child_fd, data_str)
                     break
-                self.__interact_writen(self.child_fd, data)
+                # __interact_writen handles encoding
+                self.__interact_writen(self.child_fd, data_str)
 
     def __select(self, iwtd, owtd, ewtd, timeout=None):
         """This is a wrapper around select.select() that ignores signals. If
@@ -1741,6 +1827,8 @@ class spawn_windows(spawn_unix):
         codepage=None,
         columns=None,
         rows=None,
+        encoding='utf-8', # Added
+        errors='replace', # Added
     ):
         # super(spawn_windows, self).__init__(
         #     command=command,
@@ -1781,7 +1869,8 @@ class spawn_windows(spawn_unix):
         self.delayafterterminate = 0.1  # Sets delay in terminate() method to allow kernel time to update process status. Time in seconds.
         self.softspace = False  # File-like object.
         self.name = f"<{repr(self)}>"  # File-like object.
-        self.encoding = None  # File-like object.
+        self.encoding = encoding # Store encoding
+        self.errors = errors # Store errors
         self.closed = True  # File-like object.
         self.ocwd = os.getcwd()
         self.cwd = cwd
@@ -1955,14 +2044,37 @@ class spawn_windows(spawn_unix):
             else:
                 raise TIMEOUT("Timeout exceeded in read_nonblocking().")
         else:
-            if self.logfile is not None:
-                self.logfile.write(s)
-                self.logfile.flush()
-            if self.logfile_read is not None:
-                self.logfile_read.write(s)
-                self.logfile_read.flush()
+            # *** MODIFIED: Re-encode based on Wtty codepage, then decode with desired encoding ***
+            try:
+                # Wtty returns a string decoded using its codepage. Encode it back.
+                wtty_cp_encoding = f'cp{self.wtty.codepage}'
+                s_bytes = s.encode(wtty_cp_encoding, 'replace') # Intermediate encoding
+            except LookupError:
+                # Fallback if codepage is invalid (shouldn't happen often)
+                s_bytes = s.encode('latin-1', 'replace')
 
-        return s
+            # Decode using the encoding specified for this spawn instance
+            decoded_s = s_bytes.decode(self.encoding, self.errors)
+
+            if self.logfile is not None:
+                # Log the final decoded string
+                try:
+                    self.logfile.write(decoded_s)
+                    self.logfile.flush()
+                except TypeError: # If logfile expects bytes
+                    self.logfile.write(decoded_s.encode(self.encoding, self.errors))
+                    self.logfile.flush()
+
+            if self.logfile_read is not None:
+                # Log the final decoded string
+                try:
+                    self.logfile_read.write(decoded_s)
+                    self.logfile_read.flush()
+                except TypeError: # If logfile expects bytes
+                    self.logfile_read.write(decoded_s.encode(self.encoding, self.errors))
+                    self.logfile_read.flush()
+
+            return decoded_s # Return the string decoded with the desired encoding
 
     def send(self, s):
         """This sends a string to the child process. This returns the number of
